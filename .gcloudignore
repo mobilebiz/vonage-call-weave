@@ -1,0 +1,12 @@
+# Cloud Build へ送らないもの（秘密情報は .gitignore と二重に除外）
+.git
+.gcloudignore
+#!include:.gitignore
+private.key
+*.key
+*.pem
+.env
+.env.*
+deploy/
+infra/
+docs/

@@ -1,0 +1,16 @@
+{
+  "name": "vonage-call-weave",
+  "private": true,
+  "version": "0.1.0",
+  "description": "CallWeave - Vonage + Brekeke PBX call realtime transcription",
+  "workspaces": ["server", "web"],
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "build": "npm run build -w web && npm run build -w server",
+    "dev": "npm run dev -w server",
+    "dev:web": "npm run dev -w web",
+    "test": "npm test -w server",
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w web",
+    "sim": "npm run sim -w server"
+  }
+}

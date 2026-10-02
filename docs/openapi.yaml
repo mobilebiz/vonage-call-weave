@@ -1,0 +1,226 @@
+openapi: 3.1.0
+info:
+  title: CallWeave API
+  version: 0.1.0
+  description: |
+    CallWeave 自身の API。Vonage / ASR ベンダーのエンドポイントではない。
+    /api/* は callweave-web（LB + Cloud Armor 配下）、/webhooks/* と /internal/* は callweave-control、
+    /media/vonage は callweave-media が提供する。
+    エラーは { code, message, requestId }。個人情報を含む応答は Cache-Control: no-store。
+servers:
+  - url: https://callweave.example.com
+paths:
+  /webhooks/vonage/answer:
+    post:
+      summary: 着信登録と IVR の NCCO を返す（重複時は同じ判断）
+      security: [{ vonageSignature: [] }]
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/VonageAnswer' } } } }
+      responses: { '200': { description: NCCO, content: { application/json: { schema: { type: array, items: { type: object } } } } } }
+  /webhooks/vonage/input:
+    post:
+      summary: DTMF 処理。接続用 NCCO を返す
+      security: [{ vonageSignature: [] }]
+      parameters:
+        - { name: callId, in: query, required: true, schema: { type: string } }
+        - { name: attempt, in: query, required: true, schema: { type: integer, enum: [1, 2] } }
+      responses: { '200': { description: NCCO } }
+  /webhooks/vonage/events:
+    post:
+      summary: 通話・レッグ状態の更新（冪等）
+      security: [{ vonageSignature: [] }]
+      parameters:
+        - { name: callId, in: query, schema: { type: string } }
+        - { name: leg, in: query, schema: { type: string, enum: [sip, caller_ws, operator_ws] } }
+        - { name: gen, in: query, schema: { type: integer } }
+      responses: { '204': { description: accepted } }
+  /webhooks/vonage/fallback:
+    post:
+      summary: Vonage フォールバック。案内して終了
+      responses: { '200': { description: NCCO } }
+  /media/vonage:
+    get:
+      summary: Vonage 監視 WS のアップグレード
+      description: Authorization に callId / role / 世代付きの有効期限トークン。古い世代・不正トークンは拒否。
+      security: [{ mediaToken: [] }]
+      responses: { '101': { description: Switching Protocols }, '401': { description: invalid token } }
+  /internal/tasks/run:
+    post:
+      summary: Cloud Tasks からの制御ジョブ実行
+      security: [{ googleOidc: [] }]
+      responses: { '204': { description: done }, '503': { description: retry } }
+  /internal/cron/reconcile:
+    post: { summary: 照合（毎分）, security: [{ googleOidc: [] }], responses: { '200': { description: report } } }
+  /internal/cron/cleanup:
+    post: { summary: 保存期限切れ削除（毎時）, security: [{ googleOidc: [] }], responses: { '200': { description: report } } }
+  /api/calls:
+    get:
+      summary: 通話一覧（カーソルページング）
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [active, ended, all], default: active } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, maximum: 200, default: 50 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Call' } }
+                  nextCursor: { type: [string, 'null'] }
+        '400': { $ref: '#/components/responses/Error' }
+  /api/calls/{callId}:
+    get:
+      summary: 通話詳細（最新の途中結果・欠落区間を含む）
+      parameters: [{ $ref: '#/components/parameters/callId' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  call: { $ref: '#/components/schemas/Call' }
+                  live: { type: array, items: { $ref: '#/components/schemas/Live' } }
+                  gaps: { type: array, items: { $ref: '#/components/schemas/Gap' } }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+  /api/calls/{callId}/segments:
+    get:
+      summary: 確定発話（startMs → segmentId 順、カーソルページング）
+      parameters:
+        - { $ref: '#/components/parameters/callId' }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, maximum: 500, default: 200 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Segment' } }
+                  nextCursor: { type: [string, 'null'] }
+        '404': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+  /api/calls/{callId}/export:
+    get:
+      summary: TXT / JSON ダウンロード（callweave_YYYYMMDD_HHmmss_{shortCallId}.txt|json）
+      parameters:
+        - { $ref: '#/components/parameters/callId' }
+        - { name: format, in: query, required: true, schema: { type: string, enum: [txt, json] } }
+      responses:
+        '200': { description: file, content: { text/plain: {}, application/json: {} } }
+        '409': { description: 最終化中, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '410': { $ref: '#/components/responses/Error' }
+  /api/events:
+    get:
+      summary: SSE。一覧購読（scope=calls）と選択通話の購読（scope=call）を分ける
+      description: |
+        イベント: hello, call.upsert, transcript.upsert（kind=final|partial）, transcription.status, gap, call.finalized。
+        すべて callId と revision を含む。切断時は指数バックオフで再接続し、hello 受信後にスナップショットを再取得する。
+        イベントの無限再生は保証しない（永続データから復元）。
+      parameters:
+        - { name: scope, in: query, schema: { type: string, enum: [calls, call], default: calls } }
+        - { name: callId, in: query, schema: { type: string } }
+      responses: { '200': { description: text/event-stream } }
+  /api/settings:
+    get:
+      summary: 運用設定（SIP 接続先）の取得
+      responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Settings' } } } } }
+    put:
+      summary: 運用設定の更新。次の着信から反映。revision 不一致は 409、別オリジンは 403
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [revision]
+              properties:
+                sipTargetUri: { type: [string, 'null'], description: 空文字 / null で既定値（CW_SIP_TARGET_URI）に戻す }
+                revision: { type: integer }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Settings' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /healthz:
+    get: { summary: 稼働確認, responses: { '200': { description: ok } } }
+components:
+  securitySchemes:
+    vonageSignature: { type: http, scheme: bearer, bearerFormat: JWT, description: Vonage 署名シークレットで HMAC 署名された JWT }
+    mediaToken: { type: http, scheme: bearer, bearerFormat: JWT }
+    googleOidc: { type: http, scheme: bearer, bearerFormat: JWT, description: Cloud Tasks / Scheduler の SA の OIDC トークン }
+  parameters:
+    callId: { name: callId, in: path, required: true, schema: { type: string, pattern: '^[0-9]{14}-[0-9a-f]{10}$' } }
+  responses:
+    Error: { description: error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  schemas:
+    Error:
+      type: object
+      properties: { code: { type: string }, message: { type: string }, requestId: { type: string } }
+    VonageAnswer:
+      type: object
+      properties: { uuid: { type: string }, conversation_uuid: { type: string }, from: { type: string }, to: { type: string } }
+    Call:
+      type: object
+      properties:
+        callId: { type: string }
+        shortCallId: { type: string }
+        callerDisplay: { type: string, description: 整形済み番号 / 非通知 / 番号不明 }
+        callerNumber: { type: [string, 'null'] }
+        rawCallerNumber: { type: [string, 'null'] }
+        engine: { type: [string, 'null'], enum: [amivoice, elevenlabs, deepgram, null] }
+        engineConfigVersion: { type: [string, 'null'] }
+        receivedAt: { type: string, format: date-time }
+        sipAnsweredAt: { type: [string, 'null'], format: date-time }
+        endedAt: { type: [string, 'null'], format: date-time }
+        recognitionBaseAt: { type: [string, 'null'], format: date-time }
+        callStatus: { type: string, enum: [ivr, dialing, active, ended, failed, abandoned] }
+        transcriptionStatus: { type: string, enum: [not_started, starting, streaming, degraded, finalizing, completed, partial, failed] }
+        endReason: { type: [string, 'null'] }
+        roles: { type: object }
+        limitReached: { type: boolean }
+        exportable: { type: boolean }
+        revision: { type: integer }
+    Settings:
+      type: object
+      properties:
+        sipTargetUri: { type: string, description: 現在有効な接続先 }
+        defaultSipTargetUri: { type: string }
+        isDefault: { type: boolean }
+        revision: { type: integer }
+        updatedAt: { type: [string, 'null'], format: date-time }
+    Segment:
+      type: object
+      properties:
+        segmentId: { type: string }
+        role: { type: string, enum: [caller, operator] }
+        streamEpoch: { type: integer }
+        revision: { type: integer }
+        text: { type: string }
+        startMs: { type: integer }
+        endMs: { type: integer }
+        timestampQuality: { type: string, enum: [vendor, estimated] }
+        isFinal: { const: true }
+    Live:
+      type: object
+      properties:
+        role: { type: string }
+        segmentId: { type: string }
+        revision: { type: integer }
+        text: { type: string }
+        startMs: { type: [integer, 'null'] }
+        unconfirmed: { type: boolean }
+    Gap:
+      type: object
+      properties:
+        gapId: { type: string }
+        role: { type: string }
+        startMs: { type: integer }
+        endMs: { type: [integer, 'null'] }
+        reason: { type: string }

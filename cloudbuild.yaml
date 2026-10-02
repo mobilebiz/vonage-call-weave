@@ -1,0 +1,7 @@
+# scripts/build-image.sh から CallWeave 専用プロジェクト・専用 SA で実行する
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-t', '${_IMAGE}', '.']
+images: ['${_IMAGE}']
+options:
+  logging: CLOUD_LOGGING_ONLY

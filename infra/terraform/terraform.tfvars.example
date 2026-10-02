@@ -1,0 +1,13 @@
+# cp terraform.tfvars.example terraform.tfvars で作成（terraform.tfvars は git 管理外）
+project_id            = "callweave-xxxxxx"            # CallWeave 専用プロジェクト
+# 同じ端末で扱う他プロジェクトの識別子（正規表現、任意）。一致する project_id では停止する
+forbidden_project_pattern = "other-project-a|other-project-b"
+region                = "asia-northeast1"
+vonage_application_id = "00000000-0000-0000-0000-000000000000"
+vonage_number         = "8150XXXXXXXX"
+vonage_api_base       = "https://api.nexmo.com"
+sip_target_uri        = "sip:XXXX@pbx.example.com"
+sip_from_mode         = "caller"
+web_domain            = "callweave.example.com"       # 空なら LB を作らない
+allowed_cidrs         = ["203.0.113.10/32"]           # 社内固定 IP / VPN 出口
+alert_email           = ""
